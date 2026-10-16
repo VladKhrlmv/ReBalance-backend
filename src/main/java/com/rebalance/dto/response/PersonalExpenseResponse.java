@@ -1,18 +1,15 @@
 package com.rebalance.dto.response;
 
-import lombok.AllArgsConstructor;
-import lombok.Data;
-import lombok.NoArgsConstructor;
+import java.math.BigDecimal;
+import java.time.LocalDate;
 
-import java.util.Date;
-
-@Data
-@NoArgsConstructor
-@AllArgsConstructor
-public class PersonalExpenseResponse {
-    private Long id;
-    private Double amount;
-    private String description;
-    private Date date;
-    private String category;
+public record PersonalExpenseResponse(
+        Long id,
+        BigDecimal amount,
+        String description,
+        LocalDate date,
+        String category,
+        Long version,
+        boolean hasImage
+) {
 }

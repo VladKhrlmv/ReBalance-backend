@@ -1,16 +1,4 @@
 package com.rebalance.dto.response;
 
-import lombok.AllArgsConstructor;
-import lombok.Data;
-import lombok.NoArgsConstructor;
-
-@Data
-@NoArgsConstructor
-@AllArgsConstructor
-public class UserResponse {
-    private Long id;
-    private String nickname;
-    private String email;
-    private String currency;
-    private Long personalGroupId;
+public record UserResponse(Long id, String nickname, String email, String currency, Long personalGroupId) {
 }

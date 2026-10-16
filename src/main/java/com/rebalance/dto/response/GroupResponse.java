@@ -1,15 +1,20 @@
 package com.rebalance.dto.response;
 
-import lombok.AllArgsConstructor;
-import lombok.Data;
-import lombok.NoArgsConstructor;
+import java.math.BigDecimal;
+import java.time.Instant;
 
-@Data
-@NoArgsConstructor
-@AllArgsConstructor
-public class GroupResponse {
-    private Long id;
-    private String name;
-    private String currency;
-    private Boolean favorite;
+public record GroupResponse(
+        Long id,
+        String name,
+        String currency,
+        boolean favorite,
+        boolean owner,
+        Long ownerUserId,
+        Long myMemberId,
+        BigDecimal myBalance,
+        long memberCount,
+        String inviteToken,
+        boolean inviteEnabled,
+        Instant createdAt
+) {
 }

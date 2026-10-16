@@ -1,13 +1,13 @@
 package com.rebalance.entity;
 
 public enum NotificationType {
-    UserAddedToGroup,
-    CurrentUserAddedToGroup,
-    GroupCreated,
+    MemberJoined,
+    MemberLeft,
+    MemberRemoved,
+    GroupRenamed,
+    GroupDeleted,
     GroupExpenseAdded,
     GroupExpenseEdited,
     GroupExpenseDeleted,
-    PersonalExpenseAdded,
-    PersonalExpenseEdited,
-    PersonalExpenseDeleted
+    SettlementAdded
 }

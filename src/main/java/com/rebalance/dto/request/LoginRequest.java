@@ -1,20 +1,14 @@
 package com.rebalance.dto.request;
 
-import com.rebalance.dto.common.ValidationConst;
-import jakarta.validation.constraints.Email;
-import jakarta.validation.constraints.NotNull;
-import lombok.AllArgsConstructor;
-import lombok.Data;
-import lombok.NoArgsConstructor;
-import lombok.extern.jackson.Jacksonized;
+import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.Size;
 
-@AllArgsConstructor
-@NoArgsConstructor
-@Data
-@Jacksonized
-public class LoginRequest {
-    @Email(message = "Email is required", regexp = ValidationConst.emailRegex)
-    private String email;
-    @NotNull(message = "Password is required")
-    private String password;
+public record LoginRequest(
+        @NotBlank(message = "Email is required")
+        @Size(max = 254, message = "Email is too long")
+        String email,
+        @NotBlank(message = "Password is required")
+        @Size(max = 255, message = "Password is too long")
+        String password
+) {
 }

@@ -1,6 +1,0 @@
-ALTER TABLE user_group
-    MODIFY balance VARCHAR(255) NOT NULL DEFAULT '0';
-ALTER TABLE expenses
-    MODIFY amount VARCHAR(255) NOT NULL;
-ALTER TABLE expense_user
-    MODIFY amount VARCHAR(255) NOT NULL;

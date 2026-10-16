@@ -1,0 +1,14 @@
+[Unit]
+Description=ReBalance backup (MySQL dump + receipt images -> OCI Object Storage)
+Documentation=file:///opt/rebalance/app/deploy/README.md
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Installed by setup-vm.sh (path is rewritten if the app lives elsewhere).
+ExecStart=/bin/bash /opt/rebalance/app/deploy/backup/backup.sh
+Nice=10
+IOSchedulingClass=idle
+TimeoutStartSec=1h

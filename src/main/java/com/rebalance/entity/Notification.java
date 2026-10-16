@@ -1,74 +1,44 @@
 package com.rebalance.entity;
 
 import jakarta.persistence.*;
-import lombok.*;
-import org.hibernate.annotations.OnDelete;
-import org.hibernate.annotations.OnDeleteAction;
+import lombok.Getter;
+import lombok.NoArgsConstructor;
+import lombok.Setter;
+import org.hibernate.annotations.JdbcTypeCode;
+import org.hibernate.type.SqlTypes;
 
 import java.time.LocalDateTime;
-import java.util.List;
-import java.util.Set;
 
-@Data
-@Builder
+@Getter
+@Setter
 @NoArgsConstructor
-@AllArgsConstructor
-@Table(name = "notifications")
+@Table(name = "notification")
 @Entity
 public class Notification {
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
-    @Column(name = "id")
     private Long id;
 
-    @Column(name = "type", nullable = false)
-    @Enumerated(EnumType.ORDINAL)
+    @Column(nullable = false, length = 40)
+    @Enumerated(EnumType.STRING)
+    @JdbcTypeCode(SqlTypes.VARCHAR)
     private NotificationType type;
 
-    @EqualsAndHashCode.Exclude
-    @ManyToOne
-    @JoinColumn(name = "initiator_id", nullable = false)
-    private User initiator;
+    @ManyToOne(fetch = FetchType.LAZY, optional = false)
+    @JoinColumn(name = "actor_user_id", nullable = false)
+    private User actor;
 
-    @EqualsAndHashCode.Exclude
-    @ManyToOne
-    @JoinColumn(name = "added_id")
-    private User added;
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "group_id")
+    private Group group;
 
     @Column(name = "expense_id")
     private Long expenseId;
 
-    @Column(name = "expense_description")
-    private String expenseDescription;
+    /** Rendered text, kept as a snapshot so renames don't rewrite history. */
+    @Column(nullable = false, length = 500)
+    private String message;
 
-    @EqualsAndHashCode.Exclude
-    @ManyToOne
-    @JoinColumn(name = "group_id")
-    private Group group;
-
-    @Column(name = "date")
-    private LocalDateTime date;
-
-    @EqualsAndHashCode.Exclude
-    @OneToMany(mappedBy = "notification")
-    @OnDelete(action = OnDeleteAction.CASCADE)
-    private Set<NotificationUser> notificationUsers;
-
-    public List<String> getMessage() {
-        return switch (type) {
-            case UserAddedToGroup ->
-                    List.of(initiator.getNickname(), " added ", added.getNickname(), " to ", group.getName());
-            case CurrentUserAddedToGroup -> List.of(initiator.getNickname(), " added you to ", group.getName());
-            case GroupCreated -> List.of(initiator.getNickname(), " created group ", group.getName());
-            case GroupExpenseAdded ->
-                    List.of(initiator.getNickname(), " added ", expenseDescription, " to ", group.getName());
-            case GroupExpenseEdited ->
-                    List.of(initiator.getNickname(), " edited ", expenseDescription, " in ", group.getName());
-            case GroupExpenseDeleted ->
-                    List.of(initiator.getNickname(), " deleted ", expenseDescription, " from ", group.getName());
-            case PersonalExpenseAdded -> List.of("Added personal expense ", expenseDescription);
-            case PersonalExpenseEdited -> List.of("Edited personal expense ", expenseDescription);
-            case PersonalExpenseDeleted -> List.of("Deleted personal expense ", expenseDescription);
-        };
-    }
+    @Column(name = "created_at", nullable = false)
+    private LocalDateTime createdAt;
 }

@@ -1,13 +1,6 @@
 package com.rebalance.dto.response;
 
-import lombok.AllArgsConstructor;
-import lombok.Data;
-import lombok.NoArgsConstructor;
+import java.math.BigDecimal;
 
-@Data
-@NoArgsConstructor
-@AllArgsConstructor
-public class SumByCategoryResponse {
-    private String category;
-    private Double sum;
+public record SumByCategoryResponse(String category, BigDecimal sum) {
 }

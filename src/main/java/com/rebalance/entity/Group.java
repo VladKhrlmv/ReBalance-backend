@@ -1,58 +1,63 @@
 package com.rebalance.entity;
 
 import jakarta.persistence.*;
-import lombok.Data;
-import lombok.EqualsAndHashCode;
+import lombok.Getter;
 import lombok.NoArgsConstructor;
-import org.hibernate.annotations.ColumnDefault;
-import org.hibernate.annotations.OnDelete;
-import org.hibernate.annotations.OnDeleteAction;
+import lombok.Setter;
 
-import java.util.HashSet;
-import java.util.Set;
+import java.time.LocalDateTime;
 
-@Data
+@Getter
+@Setter
 @NoArgsConstructor
 @Table(name = "app_group")
 @Entity
 public class Group {
-
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
-    @Column
     private Long id;
 
-    @Column(nullable = false)
+    @Column(nullable = false, length = 100)
     private String name;
 
-    @Column(nullable = false)
+    @Column(nullable = false, length = 3)
     private String currency;
 
-    @EqualsAndHashCode.Exclude
-    @ManyToOne
+    @Column(nullable = false)
+    private boolean personal;
+
+    @ManyToOne(fetch = FetchType.LAZY, optional = false)
     @JoinColumn(name = "creator_id", nullable = false)
     private User creator;
 
+    @ManyToOne(fetch = FetchType.LAZY, optional = false)
+    @JoinColumn(name = "owner_id", nullable = false)
+    private User owner;
+
+    @Column(name = "invite_token", length = 32)
+    private String inviteToken;
+
+    @Column(name = "invite_enabled", nullable = false)
+    private boolean inviteEnabled;
+
+    @Column(name = "created_at", nullable = false)
+    private LocalDateTime createdAt;
+
+    @Column(name = "updated_at", nullable = false)
+    private LocalDateTime updatedAt;
+
+    @Column(name = "deleted_at")
+    private LocalDateTime deletedAt;
+
+    @Version
     @Column(nullable = false)
-    @ColumnDefault("0")
-    private Boolean personal = false;
+    private Long version;
 
-    @EqualsAndHashCode.Exclude
-    @OneToMany(mappedBy = "group")
-    @OnDelete(action = OnDeleteAction.CASCADE)
-    private Set<UserGroup> users = new HashSet<>();
+    public boolean isDeleted() {
+        return deletedAt != null;
+    }
 
-    @EqualsAndHashCode.Exclude
-    @OneToMany(mappedBy = "group")
-    @OnDelete(action = OnDeleteAction.CASCADE)
-    private Set<Expense> expenses;
-
-    @EqualsAndHashCode.Exclude
-    @OneToMany(mappedBy = "group")
-    @OnDelete(action = OnDeleteAction.CASCADE)
-    private Set<GroupCategory> categories = new HashSet<>();
-
-    public Boolean isPersonalOf(User user) {
-        return personal && creator.getId().equals(user.getId());
+    public boolean isOwnedBy(User user) {
+        return owner.getId().equals(user.getId());
     }
 }

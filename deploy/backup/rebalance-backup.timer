@@ -1,0 +1,11 @@
+[Unit]
+Description=Nightly ReBalance backup (03:30, VM time zone - UTC on OCI images)
+
+[Timer]
+OnCalendar=*-*-* 03:30:00
+RandomizedDelaySec=10min
+# Run at next boot if the VM was off at 03:30.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

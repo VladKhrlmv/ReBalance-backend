@@ -1,0 +1,5 @@
+# Production secrets - never commit.
+.env
+# Runtime data on the VM: receipt images and local backups.
+data/
+backups/

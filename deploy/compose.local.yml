@@ -1,0 +1,38 @@
+# Local end-to-end stack: same services as production, images built from local sources.
+#
+# Use the wrapper scripts (they build the jar + SPA first):
+#   bash local-up.sh         (Linux/macOS/Git Bash)
+#   .\local-up.ps1           (Windows PowerShell)
+# or by hand, from this directory:
+#   docker compose -f docker-compose.yml -f compose.local.yml --env-file .env.local up -d --build
+# Then open http://localhost:8088
+#
+# Stop:   docker compose -f docker-compose.yml -f compose.local.yml --env-file .env.local down
+# Reset:  ... down -v   (also deletes the local database + images volumes)
+name: rebalance-local
+
+services:
+  backend:
+    image: rebalance-backend:local
+    pull_policy: build
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    # Named volume instead of the ./data/images bind mount: no host uid/permission issues;
+    # the image creates /data/images owned by uid 10001, which a fresh volume inherits.
+    volumes: !override
+      - local_images:/data/images
+
+  web:
+    image: rebalance-web:local
+    pull_policy: build
+    build:
+      # Frontend repo checked out next to this one (ReBalance/ReBalanceWeb).
+      context: ${WEB_SRC_DIR:-../../ReBalanceWeb}
+      dockerfile: Dockerfile
+    # Caddy listens on 8088 inside the container because SITE_ADDRESS=http://localhost:8088.
+    ports: !override
+      - "127.0.0.1:8088:8088"
+
+volumes:
+  local_images:

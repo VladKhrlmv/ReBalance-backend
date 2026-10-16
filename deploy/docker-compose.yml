@@ -1,0 +1,131 @@
+# ReBalance production stack (one VM): MySQL + Spring Boot backend + Caddy (TLS, SPA, reverse proxy).
+#
+#   cd /opt/rebalance/app/deploy
+#   docker compose pull && docker compose up -d
+#
+# Configuration comes from ./.env (see .env.example). Only Caddy (web) is published;
+# db and backend are reachable only on the internal compose network.
+name: rebalance
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
+services:
+  db:
+    image: mysql:8.4
+    restart: unless-stopped
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_0900_ai_ci
+      # Small-VM tuning (~400-500 MB RSS). Raise the buffer pool if the data set grows.
+      - --innodb-buffer-pool-size=256M
+      - --performance-schema=OFF
+      - --max-connections=60
+      - --skip-name-resolve
+      # Single instance, nightly logical backups -> no binary log needed (saves disk + IO).
+      - --disable-log-bin
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?MYSQL_ROOT_PASSWORD must be set in .env}
+      MYSQL_DATABASE: rebalance
+      # MYSQL_USER/MYSQL_PASSWORD are only applied when the volume is initialised (first start).
+      # To change DB_PASSWORD later see README.md -> "Rotating secrets".
+      MYSQL_USER: ${DB_USERNAME:-rebalance}
+      MYSQL_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD must be set in .env}
+      TZ: UTC
+    volumes:
+      - db_data:/var/lib/mysql
+    healthcheck:
+      # TCP (not the socket) so the check fails during the image's init phase,
+      # which runs a temporary server with networking disabled.
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "--silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
+      start_interval: 5s
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+    logging: *default-logging
+
+  backend:
+    image: ${BACKEND_IMAGE:-ghcr.io/vladkhrlmv/rebalance-backend:latest}
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    # Explicit list (instead of env_file) so the MySQL root password, rclone keys, etc.
+    # never reach the application container, and missing secrets fail fast at `up`.
+    environment:
+      SPRING_PROFILES_ACTIVE: prod
+      DB_URL: ${DB_URL:-jdbc:mysql://db:3306/rebalance?serverTimezone=UTC&useSSL=false&allowPublicKeyRetrieval=true}
+      DB_USERNAME: ${DB_USERNAME:-rebalance}
+      DB_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD must be set in .env}
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set in .env (openssl rand -base64 48)}
+      # Empty = no cross-origin access; the SPA is served from the same origin by Caddy.
+      APP_CORS_ORIGINS: ${APP_CORS_ORIGINS:-}
+      APP_STORAGE_PATH: /data/images
+      JAVA_OPTS: ${JAVA_OPTS:--Xms768m -Xmx768m -XX:+AlwaysPreTouch -XX:+UseSerialGC -XX:+ExitOnOutOfMemoryError}
+      TZ: UTC
+    volumes:
+      # Receipt images. Host dir must be owned by uid/gid 10001 (setup-vm.sh does this).
+      - ./data/images:/data/images
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      # No curl in the image: plain HTTP request over bash's /dev/tcp to the public health endpoint.
+      test:
+        - CMD
+        - bash
+        - -c
+        - >-
+          exec 3<>/dev/tcp/127.0.0.1/8080 &&
+          printf 'GET /v1/connect/test HTTP/1.0\r\nHost: localhost\r\n\r\n' >&3 &&
+          head -n 1 <&3 | grep -q '^HTTP/1\.[01] 200'
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 120s
+      start_interval: 5s
+    stop_grace_period: 40s
+    deploy:
+      resources:
+        limits:
+          # Heap (JAVA_OPTS) + metaspace + threads. Raise together with -Xmx.
+          memory: 1536M
+    logging: *default-logging
+
+  web:
+    image: ${WEB_IMAGE:-ghcr.io/vladkhrlmv/rebalance-web:latest}
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp" # HTTP/3
+    environment:
+      # e.g. 203-0-113-10.sslip.io or rebalance.example.com (automatic HTTPS),
+      # or http://localhost:8088 for local testing (plain HTTP).
+      SITE_ADDRESS: ${SITE_ADDRESS:?SITE_ADDRESS must be set in .env}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # TLS certificates + ACME account. Keep this volume, or Let's Encrypt rate limits may bite.
+      - caddy_data:/data
+      - caddy_config:/config
+    security_opt:
+      - no-new-privileges:true
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+    logging: *default-logging
+
+volumes:
+  db_data:
+  caddy_data:
+  caddy_config:

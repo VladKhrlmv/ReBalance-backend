@@ -1,70 +1,83 @@
 package com.rebalance.service;
 
+import com.rebalance.dto.response.CategoryResponse;
+import com.rebalance.dto.response.SumByCategoryResponse;
 import com.rebalance.entity.Category;
 import com.rebalance.entity.Group;
-import com.rebalance.entity.GroupCategory;
-import com.rebalance.entity.User;
+import com.rebalance.mapper.DtoMapper;
 import com.rebalance.repository.CategoryRepository;
-import com.rebalance.repository.GroupCategoryRepository;
-import com.rebalance.repository.GroupRepository;
-import com.rebalance.security.SignedInUsernameGetter;
-import jakarta.persistence.Tuple;
+import com.rebalance.repository.ExpenseRepository;
+import com.rebalance.util.Time;
 import lombok.RequiredArgsConstructor;
-import org.springframework.data.domain.Sort;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
-import java.math.BigDecimal;
-import java.time.LocalDateTime;
-import java.util.HashMap;
+import java.util.Comparator;
 import java.util.List;
-import java.util.Map;
 
-@RequiredArgsConstructor
 @Service
+@RequiredArgsConstructor
 public class CategoryService {
+    static final String UNCATEGORIZED = "Uncategorized";
+
     private final CategoryRepository categoryRepository;
-    private final GroupRepository groupRepository;
-    private final GroupCategoryRepository groupCategoryRepository;
-    private final SignedInUsernameGetter signedInUsernameGetter;
-    private final GroupService groupService;
+    private final ExpenseRepository expenseRepository;
+    private final GroupAccessService groupAccessService;
+    private final DtoMapper mapper;
 
-    public List<Category> getPersonalCategories() {
-        User signedInUser = signedInUsernameGetter.getUser();
-        Group personalGroup = groupService.getPersonalGroupByUserId(signedInUser.getId());
-        return categoryRepository.findAllByGroupsGroupId(personalGroup.getId(), Sort.by(Sort.Direction.DESC, "groups.lastUsed"));
+    /**
+     * Finds the group's category by exact (case-insensitive) name or creates it. Blank names mean "no category".
+     */
+    @Transactional
+    public Category resolve(Group group, String rawName) {
+        if (rawName == null || rawName.isBlank()) {
+            return null;
+        }
+        String name = rawName.trim();
+        Category category = categoryRepository.findByGroupIdAndName(group.getId(), name)
+                .orElseGet(() -> {
+                    Category created = new Category();
+                    created.setGroup(group);
+                    created.setName(name);
+                    created.setLastUsedAt(Time.nowUtc());
+                    return categoryRepository.save(created);
+                });
+        category.setLastUsedAt(Time.nowUtc());
+        return category;
     }
 
-    public List<Category> getGroupCategories(Long groupId) {
-        Group group = groupService.getNotPersonalGroupById(groupId);
-        return categoryRepository.findAllByGroupsGroupId(group.getId(), Sort.by(Sort.Direction.DESC, "groups.lastUsed"));
+    @Transactional(readOnly = true)
+    public List<CategoryResponse> getGroupCategories(Long groupId) {
+        groupAccessService.requireMember(groupId);
+        return categories(groupId);
     }
 
-    private Category getOrCreateCategory(String name) {
-        return categoryRepository.findByNameLike(name)
-                .orElseGet(() -> categoryRepository.save(
-                        Category.builder().name(name).build()));
+    @Transactional(readOnly = true)
+    public List<CategoryResponse> getPersonalCategories() {
+        return categories(groupAccessService.requirePersonalMember().getGroup().getId());
     }
 
-    public GroupCategory getOrCreateGroupCategory(String categoryName, Group group) {
-        Category category = getOrCreateCategory(categoryName);
-
-        GroupCategory groupCategory = groupCategoryRepository.findByCategoryAndGroup(category, group)
-                .orElseGet(() -> groupCategoryRepository.save(
-                        GroupCategory.builder().category(category).group(group).lastUsed(LocalDateTime.now()).build()));
-
-        groupCategory.setLastUsed(LocalDateTime.now());
-        groupCategoryRepository.save(groupCategory);
-
-        return groupCategory;
+    @Transactional(readOnly = true)
+    public List<SumByCategoryResponse> getGroupSumByCategory(Long groupId) {
+        groupAccessService.requireMember(groupId);
+        return sums(groupId);
     }
 
-    public Map<String, BigDecimal> getSumByCategory(Long groupId) {
-        groupService.validateGroupExists(groupId);
+    @Transactional(readOnly = true)
+    public List<SumByCategoryResponse> getPersonalSumByCategory() {
+        return sums(groupAccessService.requirePersonalMember().getGroup().getId());
+    }
 
-        List<Tuple> sums = groupRepository.findAllSumsByCategory(groupId);
-        HashMap<String, BigDecimal> out = new HashMap<>(sums.size());
-        sums.forEach(s -> out.put(s.get(0, String.class), s.get(1, BigDecimal.class)));
+    private List<CategoryResponse> categories(Long groupId) {
+        return categoryRepository.findAllByGroupIdOrderByLastUsedAtDesc(groupId).stream()
+                .map(mapper::category)
+                .toList();
+    }
 
-        return out;
+    private List<SumByCategoryResponse> sums(Long groupId) {
+        return expenseRepository.sumByCategory(groupId).stream()
+                .map(row -> mapper.sumByCategory(row.getCategory() == null ? UNCATEGORIZED : row.getCategory(), row.getTotal()))
+                .sorted(Comparator.comparing(SumByCategoryResponse::sum).reversed())
+                .toList();
     }
 }

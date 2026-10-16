@@ -1,16 +1,17 @@
 package com.rebalance.dto.response;
 
-import lombok.AllArgsConstructor;
-import lombok.Data;
-import lombok.NoArgsConstructor;
+import java.math.BigDecimal;
 
-@Data
-@NoArgsConstructor
-@AllArgsConstructor
-public class DebtSettlementResponse {
-    private Long debtorId;
-    private String debtorNickname;
-    private Long creditorId;
-    private String creditorNickname;
-    private Double debt;
+/**
+ * "debtor pays creditor amount".
+ */
+public record DebtSettlementResponse(
+        Long debtorMemberId,
+        Long debtorUserId,
+        String debtorNickname,
+        Long creditorMemberId,
+        Long creditorUserId,
+        String creditorNickname,
+        BigDecimal amount
+) {
 }

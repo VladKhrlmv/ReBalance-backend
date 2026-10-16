@@ -1,56 +1,40 @@
 package com.rebalance.security;
 
-import com.rebalance.exception.RebalanceErrorType;
-import com.rebalance.exception.RebalanceException;
-import com.rebalance.repository.UserRepository;
-import lombok.RequiredArgsConstructor;
+import com.rebalance.config.AppProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
-import org.springframework.security.authentication.AuthenticationProvider;
-import org.springframework.security.authentication.dao.DaoAuthenticationProvider;
-import org.springframework.security.core.userdetails.UserDetailsService;
 import org.springframework.security.crypto.factory.PasswordEncoderFactories;
 import org.springframework.security.crypto.password.PasswordEncoder;
-import org.springframework.transaction.annotation.Transactional;
-import org.springframework.web.servlet.config.annotation.CorsRegistry;
-import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
+import org.springframework.web.cors.CorsConfiguration;
+import org.springframework.web.cors.CorsConfigurationSource;
+import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
+
+import java.util.List;
 
 @Configuration
-@RequiredArgsConstructor
 public class SecurityConfig {
-    private final UserRepository userRepository;
-
-    @Bean
-    @Transactional(readOnly = true)
-    public UserDetailsService userDetailsService() {
-        return username -> userRepository.findByEmail(username).orElseThrow(() -> new RebalanceException(RebalanceErrorType.RB_002));
-    }
-
     @Bean
     public PasswordEncoder passwordEncoder() {
         return PasswordEncoderFactories.createDelegatingPasswordEncoder();
     }
 
+    /**
+     * In production the SPA is served from the same origin, so no CORS mapping is registered at all.
+     * Local development can allow e.g. http://localhost:3000 through APP_CORS_ORIGINS.
+     */
     @Bean
-    public AuthenticationProvider authenticationProvider() {
-        DaoAuthenticationProvider authProvider = new DaoAuthenticationProvider();
-        authProvider.setUserDetailsService(userDetailsService());
-        authProvider.setPasswordEncoder(passwordEncoder());
-        return authProvider;
-    }
-
-    @Bean
-    public WebMvcConfigurer corsConfigurer() {
-        return new WebMvcConfigurer() {
-            @Override
-            public void addCorsMappings(CorsRegistry registry) {
-                registry
-                        .addMapping("/**")
-                        .allowedOriginPatterns("*")
-                        .allowedMethods("GET", "POST", "PUT", "DELETE")
-                        .allowedHeaders("*")
-                        .allowCredentials(true);
-            }
-        };
+    public CorsConfigurationSource corsConfigurationSource(AppProperties properties) {
+        UrlBasedCorsConfigurationSource source = new UrlBasedCorsConfigurationSource();
+        List<String> origins = properties.cors() == null ? List.of() : properties.cors().nonBlankOrigins();
+        if (!origins.isEmpty()) {
+            CorsConfiguration configuration = new CorsConfiguration();
+            configuration.setAllowedOrigins(origins);
+            configuration.setAllowedMethods(List.of("GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"));
+            configuration.setAllowedHeaders(List.of("Authorization", "Content-Type"));
+            configuration.setAllowCredentials(false);
+            configuration.setMaxAge(3600L);
+            source.registerCorsConfiguration("/v1/**", configuration);
+        }
+        return source;
     }
 }

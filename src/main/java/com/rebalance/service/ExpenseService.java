@@ -1,301 +1,329 @@
 package com.rebalance.service;
 
+import com.rebalance.dto.request.ExpenseRequest;
+import com.rebalance.dto.request.ExpenseShareRequest;
+import com.rebalance.dto.request.PersonalExpenseRequest;
+import com.rebalance.dto.request.SettlementRequest;
+import com.rebalance.dto.response.GroupExpenseResponse;
+import com.rebalance.dto.response.PageResponse;
+import com.rebalance.dto.response.PersonalExpenseResponse;
 import com.rebalance.entity.*;
 import com.rebalance.exception.RebalanceErrorType;
 import com.rebalance.exception.RebalanceException;
+import com.rebalance.mapper.DtoMapper;
+import com.rebalance.repository.ExpenseImageRepository;
 import com.rebalance.repository.ExpenseRepository;
-import com.rebalance.repository.ExpenseUsersRepository;
-import com.rebalance.repository.UserGroupRepository;
-import com.rebalance.repository.UserRepository;
-import com.rebalance.security.SignedInUsernameGetter;
-import jakarta.transaction.Transactional;
+import com.rebalance.repository.GroupMemberRepository;
+import com.rebalance.service.money.Money;
+import com.rebalance.service.money.SplitCalculator;
+import com.rebalance.util.Time;
 import lombok.RequiredArgsConstructor;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.domain.Sort;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
-import java.math.RoundingMode;
-import java.time.LocalDateTime;
-import java.time.ZoneId;
 import java.util.*;
+import java.util.function.Function;
 import java.util.stream.Collectors;
 
-@RequiredArgsConstructor
 @Service
+@RequiredArgsConstructor
 public class ExpenseService {
+    static final int MAX_PAGE_SIZE = 100;
+    static final String SETTLEMENT_DESCRIPTION = "Settle up";
+
     private final ExpenseRepository expenseRepository;
-    private final GroupService groupService;
-    private final NotificationService notificationService;
+    private final ExpenseImageRepository imageRepository;
+    private final GroupMemberRepository memberRepository;
+    private final GroupAccessService groupAccessService;
     private final CategoryService categoryService;
-    private final ExpenseUsersRepository expenseUsersRepository;
-    private final UserGroupRepository userGroupRepository;
-    private final SignedInUsernameGetter signedInUsernameGetter;
-    private final UserRepository userRepository;
+    private final NotificationService notificationService;
+    private final DtoMapper mapper;
 
-    @Transactional
-    public Expense saveGroupExpense(Expense expense, List<ExpenseUsers> expenseUsers, String category) {
-        // validate input data
-        validateUserUniqueness(expenseUsers);
-        Group group = groupService.getNotPersonalGroupById(expense.getGroup().getId());
+    // ----- group expenses -----
 
-        User signedInUser = signedInUsernameGetter.getUser();
-        // validate users, initiator and signed user in group
-        validateUsersInGroup(expenseUsers, expense.getInitiator(), signedInUser, expense.getGroup().getId());
+    @Transactional(readOnly = true)
+    public PageResponse<GroupExpenseResponse> getGroupExpenses(Long groupId, int page, int size) {
+        groupAccessService.requireMember(groupId);
+        Page<Expense> expenses = expenseRepository.findAllByGroupIdAndDeletedAtIsNull(groupId, pageRequest(page, size));
+        Set<Long> withImage = expenseIdsWithImage(expenses.getContent());
+        return PageResponse.of(expenses, e -> mapper.groupExpense(e, withImage.contains(e.getId())));
+    }
 
-        // set auto generated fields
-        expense.setAddedBy(signedInUser);
-        if (expense.getDate() == null) {
-            expense.setDate(LocalDateTime.ofInstant(new Date().toInstant(), ZoneId.of("UTC")));
-        }
-        expense.setCategory(categoryService.getOrCreateGroupCategory(category, expense.getGroup()));
-        expenseRepository.save(expense);
-
-        // save participants of expense
-        // calculate total multipliers
-        BigDecimal totalMultipliers = BigDecimal.ZERO;
-        for (ExpenseUsers eu : expenseUsers) {
-            totalMultipliers = totalMultipliers.add(BigDecimal.valueOf(eu.getMultiplier()));
-        }
-        // set amount and expense for each ExpenseUsers
-        for (ExpenseUsers eu : expenseUsers) {
-            eu.setAmount(expense.getAmount().multiply(BigDecimal.valueOf(eu.getMultiplier()).divide(totalMultipliers, 100, RoundingMode.HALF_EVEN)));
-            eu.setExpense(expense);
-        }
-        expenseUsersRepository.saveAll(expenseUsers);
-
-        // update users balances in group
-        HashMap<Long, BigDecimal> userChanges = getBalanceDiff(expenseUsers, expense.getInitiator().getId(), expense.getAmount());
-        updateUsersBalanceInGroup(userChanges, expense.getGroup().getId());
-
-        List<User> usersToBeNotified = userRepository.findAllById(expenseUsers.stream().map(eu -> eu.getUser().getId()).toList());
-        usersToBeNotified.add(userRepository.findById(expense.getInitiator().getId()).get());
-        notificationService.saveNotificationGroupExpense(signedInUser, expense, group, usersToBeNotified, NotificationType.GroupExpenseAdded);
-
-        // set expense participants for response
-        expense.setExpenseUsers(new HashSet<>(expenseUsers));
-        return expense;
+    @Transactional(readOnly = true)
+    public GroupExpenseResponse getGroupExpense(Long groupId, Long expenseId) {
+        groupAccessService.requireMember(groupId);
+        Expense expense = getLiveExpenseOfGroup(groupId, expenseId);
+        return mapper.groupExpense(expense, imageRepository.existsById(expenseId));
     }
 
     @Transactional
-    public Expense editGroupExpense(Expense expenseRequest, List<ExpenseUsers> expenseUsers, String category) {
-        // get existing expense
-        Expense expense = getExpenseById(expenseRequest.getId());
+    public GroupExpenseResponse createGroupExpense(Long groupId, ExpenseRequest request) {
+        GroupMember me = groupAccessService.requireMember(groupId);
+        ExpenseType type = request.type() == null ? ExpenseType.EXPENSE : request.type();
 
-        // validate input data
-        validateUserUniqueness(expenseUsers);
-        Group group = groupService.getNotPersonalGroupById(expense.getGroup().getId());
-
-        User signedInUser = signedInUsernameGetter.getUser();
-        // validate users and initiator in group
-        validateUsersInGroup(expenseUsers, expenseRequest.getInitiator(), signedInUser, expense.getGroup().getId());
-
-        Long oldInitiatorId = expense.getInitiator().getId();
-        BigDecimal oldAmount = expense.getAmount();
-
-        // update fields
-        expense.setInitiator(expenseRequest.getInitiator());
-        expense.setAmount(expenseRequest.getAmount());
-        expense.setDescription(expenseRequest.getDescription());
-        expense.setCategory(categoryService.getOrCreateGroupCategory(category, expense.getGroup()));
-        if (expenseRequest.getDate() != null) {
-            expense.setDate(expenseRequest.getDate());
-        }
+        Expense expense = newExpense(me);
+        applyGroupRequest(expense, me.getGroup(), type, request);
         expenseRepository.save(expense);
 
-        // calculate total multipliers
-        BigDecimal totalMultipliers = BigDecimal.ZERO;
-        for (ExpenseUsers eu : expenseUsers) {
-            totalMultipliers = totalMultipliers.add(BigDecimal.valueOf(eu.getMultiplier()));
+        if (type == ExpenseType.TRANSFER) {
+            notifyGroup(NotificationType.SettlementAdded, me, expense, settlementMessage(me, expense));
+        } else {
+            notifyGroup(NotificationType.GroupExpenseAdded, me, expense,
+                    expenseMessage(me, "added", expense, "in"));
         }
-        // set amount and expense for each ExpenseUsers
-        for (ExpenseUsers eu : expenseUsers) {
-            eu.setAmount(expense.getAmount().multiply(BigDecimal.valueOf(eu.getMultiplier()).divide(totalMultipliers, 100, RoundingMode.HALF_EVEN)));
-            eu.setExpense(expense);
-        }
+        return mapper.groupExpense(expense, false);
+    }
 
-        // update users balances in group
-        List<ExpenseUsers> oldExpenseUsers = expenseUsersRepository.findAllByExpenseId(expense.getId());
-        // add old expenses difference and old initiator difference
-        HashMap<Long, BigDecimal> userChanges = getInverseBalanceDiff(oldExpenseUsers, oldInitiatorId, oldAmount);
-        // add new expenses difference and new initiator difference
-        HashMap<Long, BigDecimal> newUserChanges = getBalanceDiff(expenseUsers, expense.getInitiator().getId(), expense.getAmount());
-        for (Long key : newUserChanges.keySet()) {
-            if (userChanges.containsKey(key)) {
-                userChanges.put(key, userChanges.get(key).add(newUserChanges.get(key)));
-            } else {
-                userChanges.put(key, newUserChanges.get(key));
+    @Transactional
+    public GroupExpenseResponse updateGroupExpense(Long groupId, Long expenseId, ExpenseRequest request) {
+        GroupMember me = groupAccessService.requireMember(groupId);
+        Expense expense = getLiveExpenseOfGroup(groupId, expenseId);
+        checkVersion(expense, request.version());
+
+        ExpenseType type = request.type() == null ? expense.getType() : request.type();
+        applyGroupRequest(expense, me.getGroup(), type, request);
+        touch(expense, me.getUser());
+        expenseRepository.flush(); // bumps the version for the response
+
+        notifyGroup(NotificationType.GroupExpenseEdited, me, expense, expenseMessage(me, "edited", expense, "in"));
+        return mapper.groupExpense(expense, imageRepository.existsById(expenseId));
+    }
+
+    @Transactional
+    public void deleteGroupExpense(Long groupId, Long expenseId, Long version) {
+        GroupMember me = groupAccessService.requireMember(groupId);
+        Expense expense = getLiveExpenseOfGroup(groupId, expenseId);
+        checkVersion(expense, version);
+
+        softDelete(expense, me.getUser());
+        notifyGroup(NotificationType.GroupExpenseDeleted, me, expense, expenseMessage(me, "deleted", expense, "from"));
+    }
+
+    /**
+     * "Mark as paid": records that the debtor paid the creditor, as a TRANSFER expense.
+     */
+    @Transactional
+    public GroupExpenseResponse settle(Long groupId, SettlementRequest request) {
+        ExpenseRequest transfer = new ExpenseRequest(
+                ExpenseType.TRANSFER,
+                SplitType.EQUAL,
+                SETTLEMENT_DESCRIPTION,
+                request.amount(),
+                request.date(),
+                null,
+                request.debtorMemberId(),
+                List.of(new ExpenseShareRequest(request.creditorMemberId(), null, null)),
+                null);
+        return createGroupExpense(groupId, transfer);
+    }
+
+    // ----- personal expenses -----
+
+    @Transactional(readOnly = true)
+    public PageResponse<PersonalExpenseResponse> getPersonalExpenses(int page, int size) {
+        GroupMember me = groupAccessService.requirePersonalMember();
+        Page<Expense> expenses = expenseRepository.findAllByGroupIdAndDeletedAtIsNull(me.getGroup().getId(), pageRequest(page, size));
+        Set<Long> withImage = expenseIdsWithImage(expenses.getContent());
+        return PageResponse.of(expenses, e -> mapper.personalExpense(e, withImage.contains(e.getId())));
+    }
+
+    @Transactional
+    public PersonalExpenseResponse createPersonalExpense(PersonalExpenseRequest request) {
+        GroupMember me = groupAccessService.requirePersonalMember();
+        Expense expense = newExpense(me);
+        applyPersonalRequest(expense, me, request);
+        expenseRepository.save(expense);
+        return mapper.personalExpense(expense, false);
+    }
+
+    @Transactional
+    public PersonalExpenseResponse updatePersonalExpense(Long expenseId, PersonalExpenseRequest request) {
+        GroupMember me = groupAccessService.requirePersonalMember();
+        Expense expense = getLiveExpenseOfGroup(me.getGroup().getId(), expenseId);
+        checkVersion(expense, request.version());
+
+        applyPersonalRequest(expense, me, request);
+        touch(expense, me.getUser());
+        expenseRepository.flush();
+        return mapper.personalExpense(expense, imageRepository.existsById(expenseId));
+    }
+
+    @Transactional
+    public void deletePersonalExpense(Long expenseId, Long version) {
+        GroupMember me = groupAccessService.requirePersonalMember();
+        Expense expense = getLiveExpenseOfGroup(me.getGroup().getId(), expenseId);
+        checkVersion(expense, version);
+        softDelete(expense, me.getUser());
+    }
+
+    // ----- internals -----
+
+    private Expense newExpense(GroupMember me) {
+        Expense expense = new Expense();
+        expense.setGroup(me.getGroup());
+        expense.setCreatedBy(me.getUser());
+        expense.setUpdatedBy(me.getUser());
+        expense.setCreatedAt(Time.nowUtc());
+        expense.setUpdatedAt(Time.nowUtc());
+        return expense;
+    }
+
+    private void touch(Expense expense, User user) {
+        expense.setUpdatedBy(user);
+        expense.setUpdatedAt(Time.nowUtc());
+    }
+
+    private void softDelete(Expense expense, User user) {
+        expense.setDeletedAt(Time.nowUtc());
+        expense.setDeletedBy(user);
+        touch(expense, user);
+    }
+
+    private void applyGroupRequest(Expense expense, Group group, ExpenseType type, ExpenseRequest request) {
+        long totalCents = toCents(request.amount());
+        List<ExpenseShareRequest> shareRequests = request.shares();
+
+        SplitType splitType = request.splitType();
+        if (type == ExpenseType.TRANSFER) {
+            if (shareRequests.size() != 1 || shareRequests.get(0).memberId().equals(request.payerMemberId())) {
+                throw new RebalanceException(RebalanceErrorType.RB_103,
+                        "a transfer goes from the payer to exactly one other member");
             }
-        }
-        updateUsersBalanceInGroup(userChanges, expense.getGroup().getId());
-
-        // update users
-        expenseUsersRepository.deleteAllByExpenseId(expense.getId());
-        expenseUsersRepository.saveAll(expenseUsers);
-        expense.setExpenseUsers(new HashSet<>(expenseUsers));
-
-        List<User> usersToBeNotified = userRepository.findAllById(expenseUsers.stream().map(eu -> eu.getUser().getId()).toList());
-        usersToBeNotified.add(userRepository.findById(expense.getInitiator().getId()).get());
-        notificationService.saveNotificationGroupExpense(signedInUser, expense, group, usersToBeNotified, NotificationType.GroupExpenseEdited);
-
-        return expense;
-    }
-
-    public Expense savePersonalExpense(Expense expense, String category) {
-        User signedInUser = signedInUsernameGetter.getUser();
-        Group group = groupService.getPersonalGroupByUserId(signedInUser.getId());
-
-        expense.setInitiator(signedInUser);
-        expense.setAddedBy(signedInUser);
-        expense.setGroup(group);
-        if (expense.getDate() == null) {
-            expense.setDate(LocalDateTime.ofInstant(new Date().toInstant(), ZoneId.of("UTC")));
-        }
-        expense.setCategory(categoryService.getOrCreateGroupCategory(category, group));
-        expenseRepository.save(expense);
-
-        notificationService.saveNotificationPersonalExpense(signedInUser, expense, NotificationType.PersonalExpenseAdded);
-
-        return expense;
-    }
-
-    public Expense editPersonalExpense(Expense expenseRequest, String category) {
-        // get existing expense
-        Expense expense = getExpenseById(expenseRequest.getId());
-
-        User signedInUser = signedInUsernameGetter.getUser();
-
-        // validate expense is user's personal
-        if (!expense.getGroup().isPersonalOf(signedInUser)) {
-            throw new RebalanceException(RebalanceErrorType.RB_204);
+            splitType = SplitType.EQUAL;
         }
 
-        // update fields
-        expense.setAmount(expenseRequest.getAmount());
-        expense.setDescription(expenseRequest.getDescription());
-        expense.setCategory(categoryService.getOrCreateGroupCategory(category, expense.getGroup()));
-        if (expenseRequest.getDate() != null) {
-            expense.setDate(expenseRequest.getDate());
-        }
-        expenseRepository.save(expense);
-
-        notificationService.saveNotificationPersonalExpense(signedInUser, expense, NotificationType.PersonalExpenseEdited);
-        return expense;
-    }
-
-    private Expense getExpenseById(Long id) {
-        return expenseRepository.findById(id).orElseThrow(() -> new RebalanceException(RebalanceErrorType.RB_101));
-    }
-
-    public void deleteGroupExpenseById(Long expenseId) {
-        Expense expense = getExpenseById(expenseId);
-        groupService.validateGroupIsNotPersonal(expense.getGroup());
-
-        // update users balances in group
-        List<ExpenseUsers> expenseUsers = expenseUsersRepository.findAllByExpenseId(expense.getId());
-
-        HashMap<Long, BigDecimal> userChanges = getInverseBalanceDiff(expenseUsers, expense.getInitiator().getId(), expense.getAmount());
-        updateUsersBalanceInGroup(userChanges, expense.getGroup().getId());
-
-        expenseRepository.deleteById(expenseId);
-
-        User signedInUser = signedInUsernameGetter.getUser();
-        List<User> usersToBeNotified = userRepository.findAllById(expenseUsers.stream().map(eu -> eu.getUser().getId()).toList());
-        notificationService.saveNotificationGroupExpense(signedInUser, expense, expense.getGroup(), usersToBeNotified, NotificationType.GroupExpenseDeleted);
-    }
-
-    public void deletePersonalExpenseById(Long expenseId) {
-        Expense expense = getExpenseById(expenseId);
-        User signedInUser = signedInUsernameGetter.getUser();
-        groupService.validateGroupIsPersonal(expense.getGroup().getId(), signedInUser.getId());
-
-        expenseRepository.deleteById(expenseId);
-        notificationService.saveNotificationPersonalExpense(signedInUser, expense, NotificationType.PersonalExpenseDeleted);
-    }
-
-    public void throwExceptionIfExpensesWithGlobalIdNotFound(Long globalId) {
-        if (expenseRepository.findById(globalId).isEmpty()) {
-            throw new RebalanceException(RebalanceErrorType.RB_101);
-        }
-    }
-
-    public Page<Expense> getExpensesOfGroup(Long groupId, Integer page, Integer size) {
-        groupService.validateGroupExistsAndNotPersonal(groupId);
-        User signedInUser = signedInUsernameGetter.getUser();
-        groupService.validateUsersInGroup(Set.of(signedInUser.getId()), groupId);
-        Pageable pageable = PageRequest.of(page, size, Sort.by(Sort.Direction.DESC, "date"));
-        return expenseRepository.findAllByGroupId(groupId, pageable);
-    }
-
-    public List<Expense> getExpensesOfGroupByIds(Long groupId, List<Long> expenseIds) {
-        groupService.validateGroupExistsAndNotPersonal(groupId);
-        User signedInUser = signedInUsernameGetter.getUser();
-        groupService.validateUsersInGroup(Set.of(signedInUser.getId()), groupId);
-        return expenseRepository.findAllByGroupIdAndIdIn(groupId, expenseIds, Sort.by(Sort.Direction.DESC, "date"));
-    }
-
-    public Page<Expense> getExpensesOfUser(Integer page, Integer size) {
-        User signedInuser = signedInUsernameGetter.getUser();
-        Group personalGroup = groupService.getPersonalGroupByUserId(signedInuser.getId());
-        Pageable pageable = PageRequest.of(page, size, Sort.by(Sort.Direction.DESC, "date"));
-        return expenseRepository.findAllByGroupId(personalGroup.getId(), pageable);
-    }
-
-    public List<Expense> getExpensesOfUserByIds(List<Long> expenseIds) {
-        User signedInuser = signedInUsernameGetter.getUser();
-        Group personalGroup = groupService.getPersonalGroupByUserId(signedInuser.getId());
-        return expenseRepository.findAllByGroupIdAndIdIn(personalGroup.getId(), expenseIds, Sort.by(Sort.Direction.DESC, "date"));
-    }
-
-    private HashMap<Long, BigDecimal> getBalanceDiff(List<ExpenseUsers> expenseUsers, Long initiatorId,
-                                                     BigDecimal expenseAmount) {
-        HashMap<Long, BigDecimal> userChanges = new HashMap<>(expenseUsers.size() + 1);
-        expenseUsers.forEach(u -> userChanges.put(u.getUser().getId(), u.getAmount().negate()));
-        if (userChanges.containsKey(initiatorId)) {
-            userChanges.put(initiatorId, expenseAmount.add(userChanges.get(initiatorId)));
-        } else {
-            userChanges.put(initiatorId, expenseAmount);
-        }
-        return userChanges;
-    }
-
-    private HashMap<Long, BigDecimal> getInverseBalanceDiff(List<ExpenseUsers> expenseUsers, Long initiatorId,
-                                                            BigDecimal expenseAmount) {
-        HashMap<Long, BigDecimal> userChanges = new HashMap<>(expenseUsers.size() + 1);
-        expenseUsers.forEach(u -> userChanges.put(u.getUser().getId(), u.getAmount()));
-        if (userChanges.containsKey(initiatorId)) {
-            userChanges.put(initiatorId, expenseAmount.negate().add(userChanges.get(initiatorId)));
-        } else {
-            userChanges.put(initiatorId, expenseAmount.negate());
-        }
-        return userChanges;
-    }
-
-    private void updateUsersBalanceInGroup(Map<Long, BigDecimal> userChanges, Long groupId) {
-        List<UserGroup> userGroups = userGroupRepository.findAllByGroupIdAndUserIdIn(groupId, userChanges.keySet());
-        userGroups.forEach(ug -> {
-            ug.setBalance(ug.getBalance().add(userChanges.get(ug.getUser().getId())));
-        });
-        userGroupRepository.saveAll(userGroups);
-    }
-
-    private void validateUsersInGroup(List<ExpenseUsers> users, User initiator, User signedInUser, Long groupId) {
-        Set<Long> userIds = users.stream().map(expenseUser ->
-                expenseUser.getUser().getId()).collect(Collectors.toSet());
-        userIds.add(initiator.getId());
-        userIds.add(signedInUser.getId());
-        groupService.validateUsersInGroup(userIds, groupId);
-    }
-
-    private void validateUserUniqueness(List<ExpenseUsers> users) {
-        HashSet<Long> userIds = new HashSet<>(users.size());
-        users.forEach(u -> {
-            // if element already present in set, it will return false and fail
-            if (!userIds.add(u.getUser().getId())) {
+        Set<Long> shareMemberIds = new HashSet<>();
+        for (ExpenseShareRequest share : shareRequests) {
+            if (!shareMemberIds.add(share.memberId())) {
                 throw new RebalanceException(RebalanceErrorType.RB_105);
             }
-        });
+        }
+        Set<Long> involved = new HashSet<>(shareMemberIds);
+        involved.add(request.payerMemberId());
+
+        // lock the involved members so nobody leaves while this expense is saved
+        Map<Long, GroupMember> members = memberRepository.lockAllByGroupIdAndIdIn(group.getId(), involved).stream()
+                .collect(Collectors.toMap(GroupMember::getId, Function.identity()));
+        if (members.size() != involved.size() || members.values().stream().anyMatch(m -> !m.isActive())) {
+            throw new RebalanceException(RebalanceErrorType.RB_104);
+        }
+
+        List<SplitCalculator.Participant> participants = shareRequests.stream()
+                .map(s -> new SplitCalculator.Participant(s.memberId(), s.weight(), s.amount() == null ? null : toCents(s.amount())))
+                .toList();
+        List<SplitCalculator.Share> shares;
+        try {
+            shares = SplitCalculator.split(splitType, totalCents, participants);
+        } catch (SplitCalculator.InvalidSplitException e) {
+            throw new RebalanceException(RebalanceErrorType.RB_103, e.getMessage());
+        } catch (ArithmeticException e) {
+            throw new RebalanceException(RebalanceErrorType.RB_103, "amounts are too large");
+        }
+
+        expense.setType(type);
+        expense.setSplitType(splitType);
+        expense.setDescription(request.description().trim());
+        expense.setAmount(Money.fromCents(totalCents));
+        expense.setDate(request.date() == null ? Time.todayUtc() : request.date());
+        expense.setCategory(type == ExpenseType.TRANSFER ? null : categoryService.resolve(group, request.category()));
+        expense.setPayer(members.get(request.payerMemberId()));
+        mergeShares(expense, shares, members);
+    }
+
+    private void applyPersonalRequest(Expense expense, GroupMember me, PersonalExpenseRequest request) {
+        long totalCents = toCents(request.amount());
+        expense.setType(ExpenseType.EXPENSE);
+        expense.setSplitType(SplitType.EQUAL);
+        expense.setDescription(request.description().trim());
+        expense.setAmount(Money.fromCents(totalCents));
+        expense.setDate(request.date() == null ? Time.todayUtc() : request.date());
+        expense.setCategory(categoryService.resolve(me.getGroup(), request.category()));
+        expense.setPayer(me);
+        // the owner "owes" the whole personal expense to themselves, so personal balances stay at zero
+        mergeShares(expense, List.of(new SplitCalculator.Share(me.getId(), 1, totalCents)), Map.of(me.getId(), me));
+    }
+
+    /**
+     * Updates shares in place (keyed by member), so the unique (expense, member) constraint is never violated by
+     * Hibernate inserting new rows before deleting old ones.
+     */
+    private void mergeShares(Expense expense, List<SplitCalculator.Share> shares, Map<Long, GroupMember> members) {
+        Map<Long, ExpenseShare> existing = expense.getShares().stream()
+                .collect(Collectors.toMap(s -> s.getMember().getId(), Function.identity()));
+        Set<Long> kept = new HashSet<>();
+        for (SplitCalculator.Share share : shares) {
+            ExpenseShare entity = existing.get(share.memberId());
+            if (entity == null) {
+                entity = new ExpenseShare();
+                entity.setExpense(expense);
+                entity.setMember(members.get(share.memberId()));
+                expense.getShares().add(entity);
+            }
+            entity.setWeight(share.weight());
+            entity.setAmount(Money.fromCents(share.amountCents()));
+            kept.add(share.memberId());
+        }
+        expense.getShares().removeIf(s -> !kept.contains(s.getMember().getId()));
+    }
+
+    private Expense getLiveExpenseOfGroup(Long groupId, Long expenseId) {
+        return expenseRepository.findByIdAndDeletedAtIsNull(expenseId)
+                .filter(e -> e.getGroup().getId().equals(groupId))
+                .orElseThrow(() -> new RebalanceException(RebalanceErrorType.RB_101));
+    }
+
+    private static void checkVersion(Expense expense, Long version) {
+        if (version == null) {
+            throw new RebalanceException(RebalanceErrorType.RB_998, "version is required");
+        }
+        if (!version.equals(expense.getVersion())) {
+            throw new RebalanceException(RebalanceErrorType.RB_102);
+        }
+    }
+
+    private static long toCents(BigDecimal amount) {
+        try {
+            return Money.toCents(amount);
+        } catch (ArithmeticException e) {
+            throw new RebalanceException(RebalanceErrorType.RB_998, "amounts can have at most 2 decimals");
+        }
+    }
+
+    private static Pageable pageRequest(int page, int size) {
+        return PageRequest.of(Math.max(page, 0), Math.min(Math.max(size, 1), MAX_PAGE_SIZE),
+                Sort.by(Sort.Direction.DESC, "date").and(Sort.by(Sort.Direction.DESC, "id")));
+    }
+
+    private Set<Long> expenseIdsWithImage(List<Expense> expenses) {
+        if (expenses.isEmpty()) {
+            return Set.of();
+        }
+        return imageRepository.findAllByExpenseIdIn(expenses.stream().map(Expense::getId).toList()).stream()
+                .map(ExpenseImage::getExpenseId)
+                .collect(Collectors.toSet());
+    }
+
+    private void notifyGroup(NotificationType type, GroupMember actor, Expense expense, String message) {
+        notificationService.notify(type, actor.getUser(), actor.getGroup(), expense.getId(), message,
+                memberRepository.findActiveUserIds(actor.getGroup().getId()));
+    }
+
+    private static String expenseMessage(GroupMember actor, String verb, Expense expense, String preposition) {
+        return "%s %s \"%s\" (%s %s) %s %s".formatted(
+                actor.getUser().getNickname(), verb, expense.getDescription(),
+                expense.getAmount().toPlainString(), actor.getGroup().getCurrency(),
+                preposition, actor.getGroup().getName());
+    }
+
+    private static String settlementMessage(GroupMember actor, Expense transfer) {
+        String receiver = transfer.getShares().get(0).getMember().getUser().getNickname();
+        return "%s recorded a payment: %s paid %s %s %s in %s".formatted(
+                actor.getUser().getNickname(), transfer.getPayer().getUser().getNickname(), receiver,
+                transfer.getAmount().toPlainString(), actor.getGroup().getCurrency(), actor.getGroup().getName());
     }
 }

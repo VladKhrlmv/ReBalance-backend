@@ -1,0 +1,78 @@
+# ReBalance - Caddy configuration (bind-mounted into the "web" container).
+#
+# SITE_ADDRESS (from .env) decides how this site is served:
+#   203-0-113-10.sslip.io       -> automatic HTTPS (Let's Encrypt) for the VM's public IP, no domain needed
+#   rebalance.example.com       -> automatic HTTPS for a real domain (A record -> VM public IP)
+#   http://localhost:8088       -> plain HTTP on port 8088, for the local end-to-end stack
+#
+# The app is single-origin: the SPA, the REST API (/v1/...) and the STOMP WebSocket (/v1/ws)
+# share one host, so the backend needs no CORS configuration.
+#
+# Changes to this file are applied by recreating the container (deploy.sh does this automatically):
+#   docker compose up -d --force-recreate web
+{
+	# Optional: uncomment and set a real address to get Let's Encrypt expiry/problem e-mails.
+	# email you@example.com
+}
+
+{$SITE_ADDRESS} {
+	encode zstd gzip
+
+	log {
+		output stdout
+		format json
+	}
+
+	header {
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=(), usb=()"
+		Cross-Origin-Opener-Policy "same-origin"
+		# CRA + MUI: emotion injects <style> tags at runtime -> style-src needs 'unsafe-inline'.
+		# Receipt previews use data: and blob: URLs. 'self' covers same-origin ws:/wss: in current
+		# browsers; wss: is listed explicitly for older Safari versions.
+		# No external fonts/scripts are referenced by public/index.html, so nothing else is allowed.
+		# Scripts must be external files: the SPA must be built with INLINE_RUNTIME_CHUNK=false.
+		Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' wss:; manifest-src 'self'; worker-src 'self' blob:; media-src 'self' blob:; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'"
+		-Server
+	}
+
+	# HSTS only when the request actually came in over HTTPS (never for http://localhost:8088).
+	@https protocol https
+	header @https Strict-Transport-Security "max-age=31536000"
+
+	# REST API + STOMP WebSocket (/v1/ws). The /v1 prefix is kept; WebSocket upgrades are
+	# proxied automatically. X-Forwarded-For/-Proto/-Host are set by Caddy.
+	handle /v1/* {
+		# Outer guard for receipt uploads. Spring allows 5 MB per file / 6 MB per request
+		# (binary MB); this is slightly higher so Spring's own JSON error reaches the SPA,
+		# while anything bigger is cut off with 413 before it reaches the backend.
+		request_body {
+			max_size 7MB
+		}
+		reverse_proxy backend:8080
+	}
+
+	# Hashed, immutable build assets. No SPA fallback here: a missing chunk must be a 404,
+	# not index.html cached for a year.
+	handle /static/* {
+		root * /srv
+		header Cache-Control "public, max-age=31536000, immutable"
+		file_server
+	}
+
+	# Everything else: SPA with client-side routing. index.html (and favicon/manifest) are
+	# revalidated on every load so a new deploy is picked up immediately.
+	handle {
+		root * /srv
+		header Cache-Control "no-cache"
+		try_files {path} /index.html
+		file_server
+	}
+
+	handle_errors {
+		header Cache-Control "no-store"
+		respond "{err.status_code} {err.status_text}"
+	}
+}

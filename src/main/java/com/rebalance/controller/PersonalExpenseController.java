@@ -1,16 +1,15 @@
 package com.rebalance.controller;
 
-import com.rebalance.dto.request.PersonalExpensesGetRequest;
-import com.rebalance.dto.request.PersonalExpenseAddRequest;
-import com.rebalance.dto.request.PersonalExpenseEditRequest;
+import com.rebalance.dto.request.PersonalExpenseRequest;
+import com.rebalance.dto.response.CategoryResponse;
+import com.rebalance.dto.response.PageResponse;
 import com.rebalance.dto.response.PersonalExpenseResponse;
-import com.rebalance.mapper.ExpenseMapper;
+import com.rebalance.dto.response.SumByCategoryResponse;
+import com.rebalance.service.CategoryService;
 import com.rebalance.service.ExpenseService;
-import com.rebalance.service.ImageService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import lombok.RequiredArgsConstructor;
-import org.springframework.data.domain.Page;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.validation.annotation.Validated;
@@ -20,60 +19,48 @@ import java.util.List;
 
 @Tag(name = "Personal expenses management")
 @RestController
-@RequestMapping(APIVersion.current + "/personal/expenses")
+@RequestMapping(APIVersion.current + "/personal")
 @RequiredArgsConstructor
 public class PersonalExpenseController {
     private final ExpenseService expenseService;
-    private final ImageService imageService;
-    private final ExpenseMapper expenseMapper;
+    private final CategoryService categoryService;
 
-    @Operation(summary = "Get personal expenses")
-    @GetMapping()
-    public ResponseEntity<Page<PersonalExpenseResponse>> getPersonalExpenses(@RequestParam(defaultValue = "0") Integer page,
-                                                                             @RequestParam(defaultValue = "20") Integer size) {
-        return new ResponseEntity<>(
-                expenseService.getExpensesOfUser(page, size)
-                        .map(expenseMapper::expenseToPersonalResponse),
-                HttpStatus.OK);
-    }
-
-    @Operation(summary = "Get personal expenses by ids")
-    @PostMapping("/get-by-ids")
-    public ResponseEntity<List<PersonalExpenseResponse>> getExpensesById(@RequestBody @Validated PersonalExpensesGetRequest request) {
-        return new ResponseEntity<>(
-                expenseService.getExpensesOfUserByIds(request.getExpenseIds())
-                        .stream().map(expenseMapper::expenseToPersonalResponse).toList(),
-                HttpStatus.OK);
+    @Operation(summary = "Get personal expenses, newest first")
+    @GetMapping("/expenses")
+    public PageResponse<PersonalExpenseResponse> getExpenses(@RequestParam(defaultValue = "0") int page,
+                                                             @RequestParam(defaultValue = "20") int size) {
+        return expenseService.getPersonalExpenses(page, size);
     }
 
     @Operation(summary = "Add personal expense")
-    @PostMapping()
-    public ResponseEntity<PersonalExpenseResponse> addExpense(@RequestBody @Validated PersonalExpenseAddRequest request) {
-        return new ResponseEntity<>(
-                expenseMapper.expenseToPersonalResponse(
-                        expenseService.savePersonalExpense(
-                                expenseMapper.personalExpenseAddRequestToExpense(request),
-                                request.getCategory())),
-                HttpStatus.OK);
+    @PostMapping("/expenses")
+    public ResponseEntity<PersonalExpenseResponse> addExpense(@RequestBody @Validated PersonalExpenseRequest request) {
+        return new ResponseEntity<>(expenseService.createPersonalExpense(request), HttpStatus.CREATED);
     }
 
-    @Operation(summary = "Edit existing personal expense")
-    @PutMapping()
-    public ResponseEntity<PersonalExpenseResponse> editExpense(@RequestBody @Validated PersonalExpenseEditRequest request) {
-        return new ResponseEntity<>(
-                expenseMapper.expenseToPersonalResponse(
-                        expenseService.editPersonalExpense(
-                                expenseMapper.personalExpenseEditRequestToExpense(request),
-                                request.getCategory())),
-                HttpStatus.OK);
+    @Operation(summary = "Edit personal expense")
+    @PutMapping("/expenses/{expenseId}")
+    public PersonalExpenseResponse editExpense(@PathVariable Long expenseId,
+                                               @RequestBody @Validated PersonalExpenseRequest request) {
+        return expenseService.updatePersonalExpense(expenseId, request);
     }
 
     @Operation(summary = "Delete personal expense")
-    @DeleteMapping("/{expenseId}")
-    public ResponseEntity<HttpStatus> deleteExpenseById(@PathVariable("expenseId") Long expenseId) {
-        expenseService.deletePersonalExpenseById(expenseId);
-        imageService.deleteImageByGlobalId(expenseId);
+    @DeleteMapping("/expenses/{expenseId}")
+    public ResponseEntity<Void> deleteExpense(@PathVariable Long expenseId, @RequestParam Long version) {
+        expenseService.deletePersonalExpense(expenseId, version);
+        return ResponseEntity.noContent().build();
+    }
 
-        return new ResponseEntity<>(HttpStatus.NO_CONTENT);
+    @Operation(summary = "Get personal categories, most recently used first")
+    @GetMapping("/categories")
+    public List<CategoryResponse> getCategories() {
+        return categoryService.getPersonalCategories();
+    }
+
+    @Operation(summary = "Get personal spending per category")
+    @GetMapping("/sum-by-category")
+    public List<SumByCategoryResponse> getSumByCategory() {
+        return categoryService.getPersonalSumByCategory();
     }
 }

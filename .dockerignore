@@ -1,0 +1,9 @@
+# The image only needs the prebuilt Spring Boot fat jar (see Dockerfile).
+# Everything is excluded, then exactly the runnable jar is let back in.
+*
+!target/*.jar
+target/*-plain.jar
+target/*-sources.jar
+target/*-javadoc.jar
+target/*-tests.jar
+target/*-test-sources.jar
